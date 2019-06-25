@@ -1,180 +1,72 @@
-import { DataChannelOptions } from '../../interfaces/Signaling'
+import { Peer } from '../../interfaces/Protocol'
+import {
+  ServerConnectAccepted,
+  ServerPeerConnected
+} from '../../interfaces/Signaling'
+import { initializeLockstep } from './lockstep'
+import { answerConnection, offerConnection } from './rtcConnector'
+import { createSignalingOptions } from './signalingOptions'
 
-function removeHandlers(
-  socket: WebSocket,
-  connection: RTCPeerConnection,
-  messageListener: (event: MessageEvent) => void,
-  closeListener: (event: CloseEvent) => void
-) {
-  socket.removeEventListener('message', messageListener)
-  socket.removeEventListener('close', closeListener)
+function initializePeer(channel: RTCDataChannel): Peer {
+  const lowWaterMark = 262144 // should be constants!
+  const highWaterMark = 1048576
 
-  connection.onnegotiationneeded = null
-  connection.onicecandidate = null
-  connection.onconnectionstatechange = null
-  connection.ondatachannel = null
-}
+  let paused = false
+  let ready = Promise.resolve()
+  let resolvePause: (value?: void | PromiseLike<void> | undefined) => void
 
-export function offerConnection(
-  socket: WebSocket,
-  {
-    label,
-    peerConnectionOptions,
-    dataChannelOptions,
-    sendMessage,
-    handleMessage
-  }: DataChannelOptions
-): Promise<RTCDataChannel> {
-  return new Promise((resolve, reject) => {
-    const connection = new RTCPeerConnection(peerConnectionOptions)
-    const channel = connection.createDataChannel(label, dataChannelOptions)
-    const candidates: RTCIceCandidate[] = []
+  channel.bufferedAmountLowThreshold = lowWaterMark
+  channel.onbufferedamountlow = () => {
+    if (paused) {
+      console.debug(
+        `Data channel ${channel.label} resumed @ ${channel.bufferedAmount}`
+      )
+      paused = false
+      resolvePause()
+    }
+  }
 
-    let hasAnswer = false
+  const write = (message: ArrayBuffer) => {
+    if (paused) {
+      throw new Error('Unable to write, data channel is paused!')
+    }
 
-    function messageListener(event: MessageEvent) {
-      handleMessage(
-        event,
+    channel.send(message)
 
-        remoteDescription => {
-          connection.setRemoteDescription(remoteDescription)
-          candidates.forEach(candidate => connection.addIceCandidate(candidate))
-
-          hasAnswer = true
-        },
-
-        candidate => {
-          if (hasAnswer) {
-            connection.addIceCandidate(candidate)
-          } else {
-            candidates.push(candidate)
-          }
-        },
-
-        reason => {
-          removeHandlers(socket, connection, messageListener, closeListener)
-          reject(reason)
-        }
+    if (!paused && channel.bufferedAmount >= highWaterMark) {
+      paused = true
+      ready = new Promise(resolve => (resolvePause = resolve))
+      console.debug(
+        `Data channel ${channel.label} paused @ ${channel.bufferedAmount}`
       )
     }
+  }
 
-    function closeListener() {
-      removeHandlers(socket, connection, messageListener, closeListener)
-      reject(new Error('WebSocket closed'))
-    }
-
-    socket.addEventListener('message', messageListener)
-    socket.addEventListener('close', closeListener)
-
-    connection.onnegotiationneeded = () => {
-      connection.createOffer().then(localDescription => {
-        connection.setLocalDescription(localDescription)
-
-        sendMessage(socket, {
-          type: 'RTC_SESSION_DESCRIPTION_OFFER',
-          payload: localDescription
-        })
-      })
-    }
-
-    connection.onicecandidate = event => {
-      if (event.candidate) {
-        sendMessage(socket, {
-          type: 'RTC_ICE_CANDIDATE',
-          payload: event.candidate
-        })
-      }
-    }
-
-    connection.onconnectionstatechange = () => {
-      if (!['connecting', 'connected'].includes(connection.connectionState)) {
-        removeHandlers(socket, connection, messageListener, closeListener)
-        reject(new Error('RTCPeerConnection closed'))
-      }
-    }
-
-    channel.onopen = () => {
-      removeHandlers(socket, connection, messageListener, closeListener)
-      resolve(channel)
-    }
-  })
+  return { channel, ready, write }
 }
 
-export function answerConnection(
-  socket: WebSocket,
-  { peerConnectionOptions, sendMessage, handleMessage }: DataChannelOptions
-): Promise<RTCDataChannel> {
-  return new Promise((resolve, reject) => {
-    const connection = new RTCPeerConnection(peerConnectionOptions)
-    const candidates: RTCIceCandidate[] = []
+export function createServerMessageHandler(socket: WebSocket) {
+  return (event: MessageEvent) => {
+    const data = JSON.parse(event.data)
 
-    let hasOffer = false
+    switch (data.type) {
+      case 'SERVER_CONNECT_ACCEPTED': {
+        const { payload }: ServerConnectAccepted = data
+        const peers: Array<Promise<Peer>> = payload.peers.map(({ key }) =>
+          answerConnection(socket, createSignalingOptions(key)).then(channel =>
+            initializePeer(channel)
+          )
+        )
+        Promise.all(peers).then(p => initializeLockstep(p))
+        break
+      }
 
-    function messageListener(event: MessageEvent) {
-      handleMessage(
-        event,
-
-        remoteDescription => {
-          connection.setRemoteDescription(remoteDescription)
-          connection.createAnswer().then(localDescription => {
-            connection.setLocalDescription(localDescription)
-            candidates.forEach(candidate =>
-              connection.addIceCandidate(candidate)
-            )
-
-            hasOffer = true
-
-            sendMessage(socket, {
-              type: 'RTC_SESSION_DESCRIPTION_ANSWER',
-              payload: localDescription
-            })
-          })
-        },
-
-        candidate => {
-          if (hasOffer) {
-            connection.addIceCandidate(candidate)
-          } else {
-            candidates.push(candidate)
-          }
-        },
-
-        reason => {
-          removeHandlers(socket, connection, messageListener, closeListener)
-          reject(reason)
-        }
-      )
-    }
-
-    function closeListener() {
-      removeHandlers(socket, connection, messageListener, closeListener)
-      reject(new Error('WebSocket closed'))
-    }
-
-    socket.addEventListener('message', messageListener)
-    socket.addEventListener('close', closeListener)
-
-    connection.onicecandidate = event => {
-      if (event.candidate) {
-        sendMessage(socket, {
-          type: 'RTC_ICE_CANDIDATE',
-          payload: event.candidate
-        })
+      case 'SERVER_PEER_CONNECTED': {
+        const { payload }: ServerPeerConnected = data
+        offerConnection(socket, createSignalingOptions(payload.key))
+          .then(channel => initializePeer(channel))
+          .then(peer => initializeLockstep([peer]))
       }
     }
-
-    connection.onconnectionstatechange = () => {
-      if (!['connecting', 'connected'].includes(connection.connectionState)) {
-        removeHandlers(socket, connection, messageListener, closeListener)
-        reject(new Error('RTCPeerConnection closed'))
-      }
-    }
-
-    connection.ondatachannel = event => {
-      event.channel.onopen = () => {
-        removeHandlers(socket, connection, messageListener, closeListener)
-        resolve(event.channel)
-      }
-    }
-  })
+  }
 }

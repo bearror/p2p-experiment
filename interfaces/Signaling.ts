@@ -31,33 +31,33 @@ export interface PeerInfo {
   key: string
 }
 
-export interface MeshConnectMessage extends SocketMessage {
-  type: 'MESH_CONNECT'
+export interface ServerConnect extends SocketMessage {
+  type: 'SERVER_CONNECT'
   payload: string
 }
 
-export interface MeshConnectAcceptedMessage extends SocketMessage {
-  type: 'MESH_CONNECT_ACCEPTED'
+export interface ServerConnectAccepted extends SocketMessage {
+  type: 'SERVER_CONNECT_ACCEPTED'
   payload: {
     peers: PeerInfo[]
   }
 }
 
-export interface MeshConnectRejectedMessage extends SocketMessage {
-  type: 'MESH_CONNECT_REJECTED'
+export interface ServerConnectRejected extends SocketMessage {
+  type: 'SERVER_CONNECT_REJECTED'
   payload: string
 }
 
-export interface MeshPeerConnectedMessage extends SocketMessage {
-  type: 'MESH_PEER_CONNECTED'
+export interface ServerPeerConnected extends SocketMessage {
+  type: 'SERVER_PEER_CONNECTED'
   payload: PeerInfo
 }
 
 export type ControlMessage =
-  | MeshConnectMessage
-  | MeshConnectAcceptedMessage
-  | MeshConnectRejectedMessage
-  | MeshPeerConnectedMessage
+  | ServerConnect
+  | ServerConnectAccepted
+  | ServerConnectRejected
+  | ServerPeerConnected
 
 export interface DataChannelOptions {
   label: string

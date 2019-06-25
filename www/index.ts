@@ -1,8 +1,8 @@
-import { createControlMessageListener } from './src/meshConnector'
+import { createServerMessageHandler } from './src/peerConnector'
 
 const socket = new WebSocket('ws://localhost:8080')
 
-socket.onmessage = createControlMessageListener(socket)
+socket.onmessage = createServerMessageHandler(socket)
 socket.onopen = () => {
-  socket.send(JSON.stringify({ type: 'MESH_CONNECT', payload: {} }))
+  socket.send(JSON.stringify({ type: 'SERVER_CONNECT', payload: {} }))
 }
